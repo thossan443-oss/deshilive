@@ -1,0 +1,438 @@
+name: Telegram Channel Auto Post
+
+on:
+  schedule:
+    # প্রতি ২ ঘণ্টায় ১টা = ২৪ ঘণ্টায় ১২টা (UTC)
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+    inputs:
+      slot:
+        description: 'Force slot 0-11 (optional)'
+        required: false
+        default: '0'
+
+permissions:
+  contents: write
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Post one item to Telegram
+        env:
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHANNEL: ${{ secrets.TG_CHANNEL }}
+          TG_BOT_USERNAME: ${{ secrets.TG_BOT_USERNAME }}
+          SITE_URL: ${{ secrets.SITE_URL }}
+          FORCE_SLOT: ${{ github.event.inputs.slot }}
+        run: |
+          set -e
+          python3 << 'PY'
+          import os, json, random, urllib.request, urllib.parse, urllib.error
+          import hashlib, datetime, pathlib, traceback
+
+          def need(k):
+              v = (os.environ.get(k) or "").strip()
+              if not v:
+                  raise SystemExit(f"Missing secret/env: {k}")
+              return v
+
+          TOKEN = need("TG_BOT_TOKEN")
+          CHANNEL = need("TG_CHANNEL")
+          BOT_USER = need("TG_BOT_USERNAME").lstrip("@")
+          SITE = need("SITE_URL").rstrip("/")
+
+          print("SITE_URL =", SITE)
+          print("CHANNEL  =", CHANNEL)
+          print("BOT_USER =", BOT_USER)
+
+          now = datetime.datetime.utcnow()
+          today = now.strftime("%Y-%m-%d")
+          force = (os.environ.get("FORCE_SLOT") or "").strip()
+          slot = int(force) % 12 if force.isdigit() else (now.hour // 2) % 12
+          print("SLOT =", slot, "| UTC hour =", now.hour)
+
+          state_path = pathlib.Path(".github/telegram_posted_state.json")
+
+          def load_state():
+              if state_path.exists():
+                  try:
+                      return json.loads(state_path.read_text(encoding="utf-8"))
+                  except Exception:
+                      pass
+              return {"date": today, "urls": [], "done_slots": []}
+
+          def save_state(st):
+              state_path.parent.mkdir(parents=True, exist_ok=True)
+              state_path.write_text(
+                  json.dumps(st, ensure_ascii=False, indent=2),
+                  encoding="utf-8"
+              )
+
+          def http_get(url, timeout=60):
+              print("GET", url)
+              req = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "TG-AutoPost/1.2"}
+              )
+              with urllib.request.urlopen(req, timeout=timeout) as r:
+                  body = r.read().decode("utf-8", "replace")
+                  print("HTTP", r.status, "len=", len(body))
+                  return body
+
+          def fetch_list(site, page):
+              url = f"{SITE}/?action=list&page={page}&site={urllib.parse.quote(site)}"
+              raw = http_get(url)
+
+              try:
+                  data = json.loads(raw)
+              except Exception:
+                  print("RAW HEAD:", raw[:400])
+                  raise
+
+              items = data if isinstance(data, list) else (data.get("items") or [])
+
+              out = []
+
+              for it in items:
+                  if not isinstance(it, dict):
+                      continue
+
+                  u = (it.get("url") or "").strip()
+                  title = (it.get("title") or "").strip()
+                  image = (it.get("image") or "").strip()
+                  description = (it.get("description") or "").strip()
+
+                  if u and title:
+                      out.append({
+                          "title": title,
+                          "image": image,
+                          "description": description,
+                          "url": u,
+                          "site": site,
+                      })
+
+              print(f"list {site} p{page}: {len(out)} items")
+              return out
+
+          # NEW: Fetch description from details API
+          def fetch_details(post_url, site):
+              q = urllib.parse.urlencode({
+                  "action": "details",
+                  "url": post_url,
+                  "site": site,
+              })
+
+              raw = http_get(f"{SITE}/?{q}")
+
+              try:
+                  data = json.loads(raw)
+              except Exception:
+                  print("details RAW HEAD:", raw[:300])
+                  return ""
+
+              if not data.get("success"):
+                  return ""
+
+              d = data.get("data") or {}
+              desc = (d.get("description") or "").strip()
+
+              # clean short desc
+              desc = " ".join(desc.split())
+
+              return desc[:300]
+
+          def slug_from_url(u):
+              try:
+                  return urllib.parse.urlparse(u).path.rstrip("/").split("/")[-1] or ""
+              except Exception:
+                  return ""
+
+          def play_link(item):
+              slug = (
+                  slug_from_url(item["url"])
+                  or urllib.parse.quote(item["title"][:40])
+              )
+
+              tab = item.get("site") or "babe"
+              start = f"play_{slug}_{tab}"
+
+              return (
+                  f"https://t.me/{BOT_USER}"
+                  f"?startapp={urllib.parse.quote(start)}"
+              )
+
+          def tg_api(method, payload):
+              url = f"https://api.telegram.org/bot{TOKEN}/{method}"
+              data = urllib.parse.urlencode(payload).encode("utf-8")
+
+              req = urllib.request.Request(
+                  url,
+                  data=data,
+                  method="POST"
+              )
+
+              try:
+                  with urllib.request.urlopen(req, timeout=60) as r:
+                      return json.loads(
+                          r.read().decode("utf-8", "replace")
+                      )
+
+              except urllib.error.HTTPError as e:
+                  body = e.read().decode("utf-8", "replace")
+                  print("TG HTTP", e.code, body)
+
+                  try:
+                      return json.loads(body)
+                  except Exception:
+                      raise RuntimeError(
+                          f"TG HTTP {e.code}: {body}"
+                      ) from e
+
+          def post_item(item):
+
+              title = (item.get("title") or "").strip()
+
+              # NEW: use description from list API first
+              desc = (item.get("description") or "").strip()
+
+              # NEW: if no description, fetch it from details API
+              if not desc:
+                  try:
+                      desc = fetch_details(
+                          item["url"],
+                          item.get("site") or "babe"
+                      )
+                  except Exception as e:
+                      print("details failed:", e)
+                      desc = ""
+
+              # NEW: Build caption with description when available
+              if desc:
+                  caption = (
+                      f"🔥 {title[:180]}\n\n"
+                      f"📝 {desc[:250]}\n\n"
+                      f"▶️ প্লে করতে নিচের বাটনে চাপুন"
+                  )
+              else:
+                  caption = (
+                      f"🔥 {title[:200]}\n\n"
+                      f"▶️ প্লে করতে নিচের বাটনে চাপুন"
+                  )
+
+              # Telegram photo caption limit ~1024 chars
+              caption = caption[:1024]
+
+              btn = play_link(item)
+
+              print("TITLE =", title[:100])
+              print("DESC  =", desc[:250])
+              print("PLAY BTN =", btn)
+
+              keyboard = {
+                  "inline_keyboard": [[
+                      {
+                          "text": "▶️ ভিডিও প্লে করুন",
+                          "url": btn
+                      }
+                  ]]
+              }
+
+              markup = json.dumps(
+                  keyboard,
+                  ensure_ascii=False
+              )
+
+              photo = (item.get("image") or "").strip()
+
+              # 1) try sendPhoto
+              if photo.startswith("http"):
+                  print("sendPhoto", photo[:100])
+
+                  res = tg_api("sendPhoto", {
+                      "chat_id": CHANNEL,
+                      "photo": photo,
+                      "caption": caption,
+                      "reply_markup": markup,
+                  })
+
+                  if res.get("ok"):
+                      print("sendPhoto OK")
+                      return res
+
+                  print(
+                      "sendPhoto failed →",
+                      res.get("description"),
+                      "→ fallback sendMessage"
+                  )
+
+              # 2) fallback text post
+              text = caption
+
+              if photo.startswith("http"):
+                  text = f"{caption}\n\n{photo}"
+
+              print("sendMessage")
+
+              res = tg_api("sendMessage", {
+                  "chat_id": CHANNEL,
+                  "text": text[:4000],
+                  "reply_markup": markup,
+                  "disable_web_page_preview": "false",
+              })
+
+              print(
+                  "TG response ok=",
+                  res.get("ok"),
+                  "desc=",
+                  res.get("description")
+              )
+
+              if not res.get("ok"):
+                  raise RuntimeError(res)
+
+              return res
+
+          try:
+              state = load_state()
+
+              if state.get("date") != today:
+                  state = {
+                      "date": today,
+                      "urls": [],
+                      "done_slots": []
+                  }
+
+              posted = set(state.get("urls") or [])
+              done_slots = set(state.get("done_slots") or [])
+
+              # manual force slot always posts;
+              # schedule skips done slots
+              if slot in done_slots and not force:
+                  print(
+                      f"Slot {slot} already done today. Skip."
+                  )
+                  raise SystemExit(0)
+
+              # slots:
+              # 0-2  babe page1 fixed 0,1,2
+              # 3-5  hub  page1 fixed 0,1,2
+              # 6-8  babe page2 random
+              # 9-11 hub  page2 random
+
+              if slot <= 2:
+                  site, page, mode, idx = (
+                      "babe", 1, "fixed", slot
+                  )
+
+              elif slot <= 5:
+                  site, page, mode, idx = (
+                      "hub", 1, "fixed", slot - 3
+                  )
+
+              elif slot <= 8:
+                  site, page, mode, idx = (
+                      "babe", 2, "random", slot - 6
+                  )
+
+              else:
+                  site, page, mode, idx = (
+                      "hub", 2, "random", slot - 9
+                  )
+
+              print(
+                  f"TARGET site={site} "
+                  f"page={page} "
+                  f"mode={mode} "
+                  f"idx={idx}"
+              )
+
+              items = fetch_list(site, page)
+
+              if not items:
+                  raise SystemExit(
+                      f"No items for {site} page {page}"
+                  )
+
+              if mode == "fixed":
+
+                  candidates = items[:3]
+
+                  pick = (
+                      candidates[idx]
+                      if idx < len(candidates)
+                      else None
+                  )
+
+                  if pick and pick["url"] in posted:
+                      pick = next(
+                          (
+                              x for x in candidates
+                              if x["url"] not in posted
+                          ),
+                          None
+                      )
+
+              else:
+
+                  seed = int(
+                      hashlib.md5(
+                          f"{today}-{site}-p2".encode()
+                      ).hexdigest()[:8],
+                      16
+                  )
+
+                  rng = random.Random(seed)
+
+                  pool = [
+                      x for x in items
+                      if x["url"] not in posted
+                  ]
+
+                  rng.shuffle(pool)
+
+                  pick = (
+                      pool[idx]
+                      if idx < len(pool)
+                      else (pool[0] if pool else None)
+                  )
+
+              if not pick:
+                  print("No unused item for this slot.")
+                  raise SystemExit(0)
+
+              print("PICK:", pick["title"][:80])
+              print("URL :", pick["url"])
+
+              post_item(pick)
+
+              posted.add(pick["url"])
+              done_slots.add(slot)
+
+              state["urls"] = list(posted)
+              state["done_slots"] = sorted(done_slots)
+              state["date"] = today
+
+              save_state(state)
+
+              print("SUCCESS")
+
+          except Exception:
+              traceback.print_exc()
+              raise
+
+          PY
+
+      - name: Commit state
+        if: always()
+        run: |
+          if [ -f .github/telegram_posted_state.json ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .github/telegram_posted_state.json
+            git diff --staged --quiet || git commit -m "chore: telegram post state [skip ci]"
+            git push || echo "push skipped"
+          fi
