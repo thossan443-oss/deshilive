@@ -2,14 +2,9 @@ name: Telegram Channel Auto Post
 
 on:
   schedule:
-    # প্রতি ২ ঘণ্টায় ১টা = ২৪ ঘণ্টায় ১২টা (UTC)
-    - cron: '17 */2 * * *'
+    - cron: '*/20 * * * *'
+
   workflow_dispatch:
-    inputs:
-      slot:
-        description: 'Force slot 0-11 (optional)'
-        required: false
-        default: '0'
 
 permissions:
   contents: write
@@ -17,22 +12,32 @@ permissions:
 jobs:
   post:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Post one item to Telegram
+      - name: Post one random item to Telegram
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHANNEL: ${{ secrets.TG_CHANNEL }}
           TG_BOT_USERNAME: ${{ secrets.TG_BOT_USERNAME }}
           SITE_URL: ${{ secrets.SITE_URL }}
-          FORCE_SLOT: ${{ github.event.inputs.slot }}
+
         run: |
           set -e
+
           python3 << 'PY'
-          import os, json, random, urllib.request, urllib.parse, urllib.error
-          import hashlib, datetime, pathlib, traceback
+          import os
+          import json
+          import random
+          import urllib.request
+          import urllib.parse
+          import urllib.error
+          import datetime
+          import pathlib
+          import traceback
+          import html
 
           def need(k):
               v = (os.environ.get(k) or "").strip()
@@ -51,60 +56,107 @@ jobs:
 
           now = datetime.datetime.utcnow()
           today = now.strftime("%Y-%m-%d")
-          force = (os.environ.get("FORCE_SLOT") or "").strip()
-          slot = int(force) % 12 if force.isdigit() else (now.hour // 2) % 12
-          print("SLOT =", slot, "| UTC hour =", now.hour)
 
-          state_path = pathlib.Path(".github/telegram_posted_state.json")
+          state_path = pathlib.Path(
+              ".github/telegram_posted_state.json"
+          )
 
           def load_state():
               if state_path.exists():
                   try:
-                      return json.loads(state_path.read_text(encoding="utf-8"))
+                      return json.loads(
+                          state_path.read_text(
+                              encoding="utf-8"
+                          )
+                      )
                   except Exception:
-                      pass
-              return {"date": today, "urls": [], "done_slots": []}
+                      print("Invalid state file.")
+
+              return {
+                  "date": today,
+                  "urls": []
+              }
 
           def save_state(st):
-              state_path.parent.mkdir(parents=True, exist_ok=True)
+              state_path.parent.mkdir(
+                  parents=True,
+                  exist_ok=True
+              )
+
               state_path.write_text(
-                  json.dumps(st, ensure_ascii=False, indent=2),
+                  json.dumps(
+                      st,
+                      ensure_ascii=False,
+                      indent=2
+                  ),
                   encoding="utf-8"
               )
 
           def http_get(url, timeout=60):
               print("GET", url)
+
               req = urllib.request.Request(
                   url,
-                  headers={"User-Agent": "TG-AutoPost/1.2"}
+                  headers={
+                      "User-Agent": "TG-AutoPost/3.0"
+                  }
               )
-              with urllib.request.urlopen(req, timeout=timeout) as r:
-                  body = r.read().decode("utf-8", "replace")
-                  print("HTTP", r.status, "len=", len(body))
+
+              with urllib.request.urlopen(
+                  req,
+                  timeout=timeout
+              ) as r:
+                  body = r.read().decode(
+                      "utf-8",
+                      "replace"
+                  )
+
+                  print(
+                      "HTTP",
+                      r.status,
+                      "len=",
+                      len(body)
+                  )
+
                   return body
 
           def fetch_list(site, page):
-              url = f"{SITE}/?action=list&page={page}&site={urllib.parse.quote(site)}"
+
+              url = (
+                  f"{SITE}/"
+                  f"?action=list"
+                  f"&page={page}"
+                  f"&site="
+                  f"{urllib.parse.quote(site)}"
+              )
+
               raw = http_get(url)
 
               try:
                   data = json.loads(raw)
               except Exception:
-                  print("RAW HEAD:", raw[:400])
+                  print("LIST RAW HEAD:", raw[:500])
                   raise
 
-              items = data if isinstance(data, list) else (data.get("items") or [])
+              items = (
+                  data
+                  if isinstance(data, list)
+                  else (data.get("items") or [])
+              )
 
               out = []
 
               for it in items:
+
                   if not isinstance(it, dict):
                       continue
 
                   u = (it.get("url") or "").strip()
                   title = (it.get("title") or "").strip()
                   image = (it.get("image") or "").strip()
-                  description = (it.get("description") or "").strip()
+                  description = (
+                      it.get("description") or ""
+                  ).strip()
 
                   if u and title:
                       out.append({
@@ -113,61 +165,96 @@ jobs:
                           "description": description,
                           "url": u,
                           "site": site,
+                          "page": page
                       })
 
-              print(f"list {site} p{page}: {len(out)} items")
+              print(
+                  f"LIST {site} PAGE {page}: "
+                  f"{len(out)} items"
+              )
+
               return out
 
-          # NEW: Fetch description from details API
           def fetch_details(post_url, site):
+
               q = urllib.parse.urlencode({
                   "action": "details",
                   "url": post_url,
-                  "site": site,
+                  "site": site
               })
 
-              raw = http_get(f"{SITE}/?{q}")
+              raw = http_get(
+                  f"{SITE}/?{q}"
+              )
 
               try:
                   data = json.loads(raw)
               except Exception:
-                  print("details RAW HEAD:", raw[:300])
+                  print(
+                      "DETAILS RAW HEAD:",
+                      raw[:300]
+                  )
                   return ""
 
               if not data.get("success"):
                   return ""
 
               d = data.get("data") or {}
-              desc = (d.get("description") or "").strip()
 
-              # clean short desc
+              desc = (
+                  d.get("description") or ""
+              ).strip()
+
               desc = " ".join(desc.split())
 
               return desc[:300]
 
           def slug_from_url(u):
+
               try:
-                  return urllib.parse.urlparse(u).path.rstrip("/").split("/")[-1] or ""
+                  return (
+                      urllib.parse
+                      .urlparse(u)
+                      .path
+                      .rstrip("/")
+                      .split("/")[-1]
+                      or ""
+                  )
               except Exception:
                   return ""
 
           def play_link(item):
+
               slug = (
                   slug_from_url(item["url"])
-                  or urllib.parse.quote(item["title"][:40])
+                  or urllib.parse.quote(
+                      item["title"][:40]
+                  )
               )
 
               tab = item.get("site") or "babe"
+
               start = f"play_{slug}_{tab}"
 
               return (
-                  f"https://t.me/{BOT_USER}"
-                  f"?startapp={urllib.parse.quote(start)}"
+                  f"https://t.me/"
+                  f"{BOT_USER}"
+                  f"?startapp="
+                  f"{urllib.parse.quote(start)}"
               )
 
           def tg_api(method, payload):
-              url = f"https://api.telegram.org/bot{TOKEN}/{method}"
-              data = urllib.parse.urlencode(payload).encode("utf-8")
+
+              url = (
+                  f"https://api.telegram.org/"
+                  f"bot{TOKEN}/{method}"
+              )
+
+              data = (
+                  urllib.parse
+                  .urlencode(payload)
+                  .encode("utf-8")
+              )
 
               req = urllib.request.Request(
                   url,
@@ -176,14 +263,30 @@ jobs:
               )
 
               try:
-                  with urllib.request.urlopen(req, timeout=60) as r:
+                  with urllib.request.urlopen(
+                      req,
+                      timeout=60
+                  ) as r:
+
                       return json.loads(
-                          r.read().decode("utf-8", "replace")
+                          r.read().decode(
+                              "utf-8",
+                              "replace"
+                          )
                       )
 
               except urllib.error.HTTPError as e:
-                  body = e.read().decode("utf-8", "replace")
-                  print("TG HTTP", e.code, body)
+
+                  body = e.read().decode(
+                      "utf-8",
+                      "replace"
+                  )
+
+                  print(
+                      "TG HTTP",
+                      e.code,
+                      body
+                  )
 
                   try:
                       return json.loads(body)
@@ -192,50 +295,129 @@ jobs:
                           f"TG HTTP {e.code}: {body}"
                       ) from e
 
+          # =========================
+          # RANDOM TITLE EMOJIS
+          # =========================
+
+          TITLE_EMOJIS = [
+              "✨",
+              "💖",
+              "🌸",
+              "👑",
+              "💎",
+              "🔥",
+              "🎀",
+              "🌷",
+              "💫",
+              "🦋",
+              "💕",
+              "⭐"
+          ]
+
+          def make_title(title):
+
+              emoji = random.choice(
+                  TITLE_EMOJIS
+              )
+
+              # Escape Telegram HTML
+              safe_title = html.escape(
+                  title[:180],
+                  quote=False
+              )
+
+              return (
+                  f"{emoji} "
+                  f"<b>{safe_title}</b>"
+              )
+
+          def make_description(desc):
+
+              if not desc:
+                  return ""
+
+              safe_desc = html.escape(
+                  desc[:250],
+                  quote=False
+              )
+
+              return (
+                  f"📝 <i>{safe_desc}</i>"
+              )
+
           def post_item(item):
 
-              title = (item.get("title") or "").strip()
+              title = (
+                  item.get("title") or ""
+              ).strip()
 
-              # NEW: use description from list API first
-              desc = (item.get("description") or "").strip()
+              desc = (
+                  item.get("description") or ""
+              ).strip()
 
-              # NEW: if no description, fetch it from details API
               if not desc:
+
                   try:
                       desc = fetch_details(
                           item["url"],
-                          item.get("site") or "babe"
+                          item.get("site")
+                          or "babe"
                       )
                   except Exception as e:
-                      print("details failed:", e)
+                      print(
+                          "DETAILS FAILED:",
+                          e
+                      )
                       desc = ""
 
-              # NEW: Build caption with description when available
-              if desc:
+              title_text = make_title(
+                  title
+              )
+
+              desc_text = make_description(
+                  desc
+              )
+
+              if desc_text:
+
                   caption = (
-                      f"🔥 {title[:180]}\n\n"
-                      f"📝 {desc[:250]}\n\n"
-                      f"▶️ প্লে করতে নিচের বাটনে চাপুন"
-                  )
-              else:
-                  caption = (
-                      f"🔥 {title[:200]}\n\n"
-                      f"▶️ প্লে করতে নিচের বাটনে চাপুন"
+                      f"{title_text}\n\n"
+                      f"{desc_text}\n\n"
+                      f"🎬 <b>নতুন ভিডিও</b>\n"
+                      f"✨ এখনই দেখুন\n\n"
+                      f"👇 <b>প্লে করতে "
+                      f"নিচের বাটনে চাপুন</b>"
                   )
 
-              # Telegram photo caption limit ~1024 chars
+              else:
+
+                  caption = (
+                      f"{title_text}\n\n"
+                      f"🎬 <b>নতুন ভিডিও</b>\n"
+                      f"✨ এখনই দেখুন\n\n"
+                      f"👇 <b>প্লে করতে "
+                      f"নিচের বাটনে চাপুন</b>"
+                  )
+
               caption = caption[:1024]
 
               btn = play_link(item)
 
-              print("TITLE =", title[:100])
-              print("DESC  =", desc[:250])
-              print("PLAY BTN =", btn)
+              print(
+                  "TITLE =",
+                  title
+              )
+
+              print(
+                  "PLAY BTN =",
+                  btn
+              )
 
               keyboard = {
                   "inline_keyboard": [[
                       {
-                          "text": "▶️ ভিডিও প্লে করুন",
+                          "text":
+                              "▶️ ভিডিও প্লে করুন",
                           "url": btn
                       }
                   ]]
@@ -246,49 +428,73 @@ jobs:
                   ensure_ascii=False
               )
 
-              photo = (item.get("image") or "").strip()
+              photo = (
+                  item.get("image") or ""
+              ).strip()
 
-              # 1) try sendPhoto
+              # =========================
+              # SEND PHOTO
+              # =========================
+
               if photo.startswith("http"):
-                  print("sendPhoto", photo[:100])
 
-                  res = tg_api("sendPhoto", {
-                      "chat_id": CHANNEL,
-                      "photo": photo,
-                      "caption": caption,
-                      "reply_markup": markup,
-                  })
+                  print(
+                      "sendPhoto",
+                      photo[:120]
+                  )
+
+                  res = tg_api(
+                      "sendPhoto",
+                      {
+                          "chat_id": CHANNEL,
+                          "photo": photo,
+                          "caption": caption,
+                          "reply_markup": markup,
+                          "parse_mode": "HTML"
+                      }
+                  )
 
                   if res.get("ok"):
                       print("sendPhoto OK")
                       return res
 
                   print(
-                      "sendPhoto failed →",
-                      res.get("description"),
-                      "→ fallback sendMessage"
+                      "sendPhoto failed -> "
+                      "sendMessage fallback"
                   )
 
-              # 2) fallback text post
+                  print(
+                      res.get("description")
+                  )
+
+              # =========================
+              # SEND MESSAGE
+              # =========================
+
               text = caption
 
               if photo.startswith("http"):
-                  text = f"{caption}\n\n{photo}"
+                  text = (
+                      f"{caption}\n\n"
+                      f"🖼️ {photo}"
+                  )
 
               print("sendMessage")
 
-              res = tg_api("sendMessage", {
-                  "chat_id": CHANNEL,
-                  "text": text[:4000],
-                  "reply_markup": markup,
-                  "disable_web_page_preview": "false",
-              })
+              res = tg_api(
+                  "sendMessage",
+                  {
+                      "chat_id": CHANNEL,
+                      "text": text[:4000],
+                      "reply_markup": markup,
+                      "parse_mode": "HTML",
+                      "disable_web_page_preview": "false"
+                  }
+              )
 
               print(
                   "TG response ok=",
-                  res.get("ok"),
-                  "desc=",
-                  res.get("description")
+                  res.get("ok")
               )
 
               if not res.get("ok"):
@@ -296,131 +502,243 @@ jobs:
 
               return res
 
+          # =========================
+          # PAGE WEIGHTS
+          # =========================
+
+          def page_weight(page):
+
+              # Latest page gets highest priority
+              if page == 1:
+                  return 50
+
+              # Recent pages
+              if 2 <= page <= 5:
+                  return 30
+
+              # Older pages
+              if 6 <= page <= 10:
+                  return 12
+
+              # All remaining pages
+              return 8
+
+          # =========================
+          # RANDOM PAGE TARGETS
+          # =========================
+
+          def weighted_targets(
+              site,
+              max_page=50
+          ):
+
+              targets = []
+
+              for page in range(
+                  1,
+                  max_page + 1
+              ):
+
+                  weight = page_weight(
+                      page
+                  )
+
+                  for _ in range(weight):
+                      targets.append(
+                          (
+                              site,
+                              page
+                          )
+                      )
+
+              random.shuffle(targets)
+
+              return targets
+
+          # =========================
+          # MAIN
+          # =========================
+
           try:
+
               state = load_state()
 
               if state.get("date") != today:
+
                   state = {
                       "date": today,
-                      "urls": [],
-                      "done_slots": []
+                      "urls": []
                   }
 
-              posted = set(state.get("urls") or [])
-              done_slots = set(state.get("done_slots") or [])
-
-              # manual force slot always posts;
-              # schedule skips done slots
-              if slot in done_slots and not force:
-                  print(
-                      f"Slot {slot} already done today. Skip."
-                  )
-                  raise SystemExit(0)
-
-              # slots:
-              # 0-2  babe page1 fixed 0,1,2
-              # 3-5  hub  page1 fixed 0,1,2
-              # 6-8  babe page2 random
-              # 9-11 hub  page2 random
-
-              if slot <= 2:
-                  site, page, mode, idx = (
-                      "babe", 1, "fixed", slot
-                  )
-
-              elif slot <= 5:
-                  site, page, mode, idx = (
-                      "hub", 1, "fixed", slot - 3
-                  )
-
-              elif slot <= 8:
-                  site, page, mode, idx = (
-                      "babe", 2, "random", slot - 6
-                  )
-
-              else:
-                  site, page, mode, idx = (
-                      "hub", 2, "random", slot - 9
-                  )
-
-              print(
-                  f"TARGET site={site} "
-                  f"page={page} "
-                  f"mode={mode} "
-                  f"idx={idx}"
+              posted = set(
+                  state.get("urls") or []
               )
 
-              items = fetch_list(site, page)
+              print(
+                  "TODAY =",
+                  today
+              )
 
-              if not items:
-                  raise SystemExit(
-                      f"No items for {site} page {page}"
+              print(
+                  "POSTED TODAY =",
+                  len(posted)
+              )
+
+              # =========================
+              # RANDOM SITE
+              # =========================
+
+              sites = [
+                  "babe",
+                  "hub"
+              ]
+
+              random.shuffle(sites)
+
+              pick = None
+
+              # =========================
+              # SEARCH TARGETS
+              # =========================
+
+              for site in sites:
+
+                  targets = weighted_targets(
+                      site,
+                      max_page=50
                   )
 
-              if mode == "fixed":
+                  checked_pages = set()
 
-                  candidates = items[:3]
+                  for target_site, page in targets:
 
-                  pick = (
-                      candidates[idx]
-                      if idx < len(candidates)
-                      else None
-                  )
+                      if page in checked_pages:
+                          continue
 
-                  if pick and pick["url"] in posted:
-                      pick = next(
-                          (
-                              x for x in candidates
-                              if x["url"] not in posted
-                          ),
-                          None
+                      checked_pages.add(page)
+
+                      try:
+
+                          items = fetch_list(
+                              target_site,
+                              page
+                          )
+
+                      except Exception as e:
+
+                          print(
+                              f"LIST FAILED "
+                              f"{target_site} "
+                              f"page {page}:",
+                              e
+                          )
+
+                          continue
+
+                      if not items:
+                          continue
+
+                      # Only unused URLs
+                      pool = [
+                          x
+                          for x in items
+                          if x["url"] not in posted
+                      ]
+
+                      if not pool:
+
+                          print(
+                              f"USED/EMPTY: "
+                              f"{target_site} "
+                              f"page {page}"
+                          )
+
+                          continue
+
+                      # Random item
+                      pick = random.choice(
+                          pool
                       )
 
-              else:
+                      print(
+                          "SELECTED:"
+                      )
 
-                  seed = int(
-                      hashlib.md5(
-                          f"{today}-{site}-p2".encode()
-                      ).hexdigest()[:8],
-                      16
-                  )
+                      print(
+                          "SITE =",
+                          target_site
+                      )
 
-                  rng = random.Random(seed)
+                      print(
+                          "PAGE =",
+                          page
+                      )
 
-                  pool = [
-                      x for x in items
-                      if x["url"] not in posted
-                  ]
+                      print(
+                          "TOTAL ITEMS =",
+                          len(items)
+                      )
 
-                  rng.shuffle(pool)
+                      print(
+                          "UNUSED ITEMS =",
+                          len(pool)
+                      )
 
-                  pick = (
-                      pool[idx]
-                      if idx < len(pool)
-                      else (pool[0] if pool else None)
-                  )
+                      print(
+                          "TITLE =",
+                          pick["title"]
+                      )
+
+                      print(
+                          "URL =",
+                          pick["url"]
+                      )
+
+                      break
+
+                  if pick:
+                      break
+
+              # =========================
+              # NOTHING AVAILABLE
+              # =========================
 
               if not pick:
-                  print("No unused item for this slot.")
-                  raise SystemExit(0)
 
-              print("PICK:", pick["title"][:80])
-              print("URL :", pick["url"])
+                  raise SystemExit(
+                      "No unused item found."
+                  )
+
+              # =========================
+              # POST
+              # =========================
 
               post_item(pick)
 
-              posted.add(pick["url"])
-              done_slots.add(slot)
+              # =========================
+              # SAVE STATE
+              # =========================
 
-              state["urls"] = list(posted)
-              state["done_slots"] = sorted(done_slots)
+              posted.add(
+                  pick["url"]
+              )
+
               state["date"] = today
+              state["urls"] = list(posted)
 
               save_state(state)
 
-              print("SUCCESS")
+              print(
+                  "SUCCESS"
+              )
+
+              print(
+                  "TOTAL POSTED TODAY =",
+                  len(posted)
+              )
 
           except Exception:
+
               traceback.print_exc()
               raise
 
@@ -430,9 +748,16 @@ jobs:
         if: always()
         run: |
           if [ -f .github/telegram_posted_state.json ]; then
+
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
             git add .github/telegram_posted_state.json
-            git diff --staged --quiet || git commit -m "chore: telegram post state [skip ci]"
+
+            git diff --staged --quiet || \
+              git commit \
+              -m "chore: telegram post state [skip ci]"
+
             git push || echo "push skipped"
+
           fi
