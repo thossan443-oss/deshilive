@@ -445,8 +445,8 @@ jobs:
 
                   caption = (
                       f"{title_text}\n\n"
-                      f"👇 <b>প্লে করতে "
-                      f"নিচের বাটনে চাপুন</b> 🔥"
+                      f"👇 <b>See Nude for"
+                      f"Click The Button</b> 🔥"
                   )
 
               caption = caption[:1024]
@@ -467,7 +467,7 @@ jobs:
                   "inline_keyboard": [[
                       {
                           "text":
-                              "▶️ ভিডিও প্লে করুন 🔥",
+                              "▶️ Play The Nude 🔥",
                           "url": btn
                       }
                   ]]
