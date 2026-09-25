@@ -437,8 +437,8 @@ jobs:
                   caption = (
                       f"{title_text}\n\n"
                       f"{desc_text}\n\n"
-                      f"👇 <b>প্লে করতে "
-                      f"নিচের বাটনে চাপুন</b> 🔥"
+                      f"👇 <b>See TheNude "
+                      f"For Clicked</b> 🔥"
                   )
 
               else:
