@@ -124,8 +124,8 @@ jobs:
               """Build list API URL per tab (babe/hub vs viral vs tales)."""
               if site == "viral":
                   return (
-                      f"{SITE}/api/deshiviral.php"
-                      f"?action=list&page={page}"
+                      
+                      
                   )
               if site == "tales":
                   return (
@@ -645,7 +645,6 @@ jobs:
               sites = [
                   "babe",
                   "hub",
-                  "viral",
                   "tales",
               ]
 
