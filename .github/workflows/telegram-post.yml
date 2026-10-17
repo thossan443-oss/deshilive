@@ -124,8 +124,8 @@ jobs:
               """Build list API URL per tab (babe/hub vs viral vs tales)."""
               if site == "viral":
                   return (
-                      
-                      
+                      f"{SITE}/api/deshiviral.php"
+                      f"?action=list&page={page}"
                   )
               if site == "tales":
                   return (
@@ -437,16 +437,16 @@ jobs:
                   caption = (
                       f"{title_text}\n\n"
                       f"{desc_text}\n\n"
-                      f"👇 <b>See TheNude "
-                      f"For Clicked</b> 🔥"
+                      f"👇 <b>প্লে করতে "
+                      f"নিচের বাটনে চাপুন</b> 🔥"
                   )
 
               else:
 
                   caption = (
                       f"{title_text}\n\n"
-                      f"👇 <b>See Nude for"
-                      f"Click The Button</b> 🔥"
+                      f"👇 <b>প্লে করতে "
+                      f"নিচের বাটনে চাপুন</b> 🔥"
                   )
 
               caption = caption[:1024]
@@ -467,7 +467,7 @@ jobs:
                   "inline_keyboard": [[
                       {
                           "text":
-                              "▶️ Play The Nude 🔥",
+                              "▶️ ভিডিও প্লে করুন 🔥",
                           "url": btn
                       }
                   ]]
@@ -645,6 +645,7 @@ jobs:
               sites = [
                   "babe",
                   "hub",
+                  "viral",
                   "tales",
               ]
 
